@@ -13,10 +13,11 @@ import kotlin.coroutines.resumeWithException
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /** Kết quả khớp: toạ độ tâm (trong bitmap được quét) + độ giống 0..1 */
-data class Hit(val x: Int, val y: Int, val score: Double)
+data class Hit(val x: Int, val y: Int, val score: Double, val scale: Double = 1.0)
 
 /* ------------------------------------------------------------------ */
 /*  Nhận diện CHỮ (OCR bằng ML Kit, offline)                          */
@@ -84,18 +85,38 @@ object TextMatcher {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Nhận diện HÌNH ẢNH (template matching, NCC, thuần Kotlin)         */
+/*  Nhận diện HÌNH ẢNH (template matching NCC, đa tỉ lệ, thuần Kotlin) */
 /* ------------------------------------------------------------------ */
 object TemplateMatcher {
     private class G(val w: Int, val h: Int, val d: FloatArray)
 
-    private fun gray(b: Bitmap, s: Int): G {
-        val w = b.width
-        val h = b.height
-        val px = IntArray(w * h)
-        b.getPixels(px, 0, w, 0, 0, w, h)
+    /** Pixel của một bitmap, đọc đúng 1 lần để dùng lại cho nhiều mức thu nhỏ. */
+    private class Px(val w: Int, val h: Int, val px: IntArray) {
+        constructor(b: Bitmap) : this(
+            b.width, b.height,
+            IntArray(b.width * b.height).also { b.getPixels(it, 0, b.width, 0, 0, b.width, b.height) },
+        )
+    }
+
+    // Các tỉ lệ thử (ảnh trong vùng quét / ảnh mẫu): 1.0, 1.15, 0.87, 1.32, 0.76 ... trong [0.4 .. 2.5]
+    private const val SCALE_MIN = 0.4
+    private const val SCALE_MAX = 2.5
+    private const val SCALE_STEP = 1.15
+    private val SCALES: List<Double> = run {
+        val l = mutableListOf(1.0)
+        var k = SCALE_STEP
+        while (k <= SCALE_MAX) {
+            l.add(k)
+            if (1.0 / k >= SCALE_MIN) l.add(1.0 / k)
+            k *= SCALE_STEP
+        }
+        l
+    }
+
+    private fun gray(p: Px, s: Int): G {
+        val w = p.w
         val gw = w / s
-        val gh = h / s
+        val gh = p.h / s
         val out = FloatArray(gw * gh)
         val inv = 1f / (s * s)
         for (y in 0 until gh) for (x in 0 until gw) {
@@ -103,14 +124,16 @@ object TemplateMatcher {
             for (dy in 0 until s) {
                 val row = (y * s + dy) * w + x * s
                 for (dx in 0 until s) {
-                    val p = px[row + dx]
-                    acc += 0.299f * ((p shr 16) and 255) + 0.587f * ((p shr 8) and 255) + 0.114f * (p and 255)
+                    val q = p.px[row + dx]
+                    acc += 0.299f * ((q shr 16) and 255) + 0.587f * ((q shr 8) and 255) + 0.114f * (q and 255)
                 }
             }
             out[y * gw + x] = acc * inv
         }
         return G(gw, gh, out)
     }
+
+    private fun gray(b: Bitmap, s: Int): G = gray(Px(b), s)
 
     /** Trả về (x, y góc trên-trái, điểm NCC) tốt nhất. */
     private fun search(img: G, t: G): Triple<Int, Int, Double>? {
@@ -167,25 +190,86 @@ object TemplateMatcher {
         return if (best < -1) null else Triple(bx, by, best)
     }
 
-    /** Tìm [tpl] trong [region]. Thô (thu nhỏ) -> tinh chỉnh ở độ phân giải gốc. */
-    fun find(region: Bitmap, tpl: Bitmap, threshold: Double): Hit? {
-        if (tpl.width > region.width || tpl.height > region.height) return null
-        val tmin = min(tpl.width, tpl.height)
+    /** Hệ số thu nhỏ cho bước tìm thô: mẫu ~10px, và giới hạn khối lượng tính. */
+    private fun coarseFactor(rw: Int, rh: Int, tw: Int, th: Int): Int {
+        val tmin = min(tw, th)
         var s = max(1, tmin / 10)
         while (tmin / (s + 1) >= 4 &&
-            (region.width / s).toLong() * (region.height / s) * ((tpl.width / s) * (tpl.height / s)) > 80_000_000L
+            (rw / s).toLong() * (rh / s) * ((tw / s) * (th / s)) > 80_000_000L
         ) s++
+        return s
+    }
 
-        val coarse = search(gray(region, s), gray(tpl, s)) ?: return null
-        if (coarse.third < threshold - 0.2) return null
+    private fun scaled(tpl: Bitmap, w: Int, h: Int): Bitmap =
+        if (w == tpl.width && h == tpl.height) tpl else Bitmap.createScaledBitmap(tpl, w, h, true)
 
-        val rw = min(region.width, tpl.width + 4 * s)
-        val rh = min(region.height, tpl.height + 4 * s)
-        val rx = (coarse.first * s - 2 * s).coerceIn(0, region.width - rw)
-        val ry = (coarse.second * s - 2 * s).coerceIn(0, region.height - rh)
-        val sub = Bitmap.createBitmap(region, rx, ry, rw, rh)
-        val fine = search(gray(sub, 1), gray(tpl, 1)) ?: return null
-        if (fine.third < threshold) return null
-        return Hit(rx + fine.first + tpl.width / 2, ry + fine.second + tpl.height / 2, fine.third)
+    /**
+     * Tìm [tpl] trong [region], chấp nhận ảnh trong vùng quét có tỉ lệ khác ảnh mẫu.
+     * 1) Thô: thử nhiều tỉ lệ (0.4x..2.5x) ở độ phân giải thấp, chọn tỉ lệ có điểm cao nhất.
+     * 2) Tinh: quanh vị trí đó, thử thêm tỉ lệ lân cận (±6%) ở độ phân giải cao.
+     */
+    fun find(region: Bitmap, tpl: Bitmap, threshold: Double): Hit? {
+        val rpx = Px(region)
+        val cache = HashMap<Int, G>() // ảnh xám của vùng quét theo hệ số thu nhỏ
+
+        var bestK = 0.0
+        var bestScore = -2.0
+        var bx = 0
+        var by = 0
+        var bs = 1
+        var bsw = 0
+        var bsh = 0
+        for (k in SCALES) {
+            val sw = (tpl.width * k).roundToInt()
+            val sh = (tpl.height * k).roundToInt()
+            if (sw < 4 || sh < 4 || sw > region.width || sh > region.height) continue
+            val st = scaled(tpl, sw, sh)
+            val s = coarseFactor(region.width, region.height, sw, sh)
+            val rg = cache.getOrPut(s) { gray(rpx, s) }
+            val c = search(rg, gray(st, s))
+            if (st !== tpl) st.recycle()
+            if (c == null) continue
+            if (c.third > bestScore) {
+                bestScore = c.third; bestK = k
+                bx = c.first; by = c.second; bs = s; bsw = sw; bsh = sh
+            }
+            if (bestScore >= max(0.9, threshold)) break // đã đủ tốt, khỏi thử tiếp
+        }
+        if (bestK == 0.0 || bestScore < threshold - 0.2) return null
+
+        // Tâm của vị trí tìm thô (toạ độ vùng quét)
+        val cx = bx * bs + bsw / 2
+        val cy = by * bs + bsh / 2
+
+        var out: Hit? = null
+        var outScore = -2.0
+        for (d in doubleArrayOf(1.0, 0.94, 1.06)) {
+            val k = bestK * d
+            val sw = (tpl.width * k).roundToInt()
+            val sh = (tpl.height * k).roundToInt()
+            if (sw < 4 || sh < 4 || sw > region.width || sh > region.height) continue
+            val st = scaled(tpl, sw, sh)
+
+            val rw = min(region.width, sw + 4 * bs)
+            val rh = min(region.height, sh + 4 * bs)
+            val rx = (cx - sw / 2 - 2 * bs).coerceIn(0, region.width - rw)
+            val ry = (cy - sh / 2 - 2 * bs).coerceIn(0, region.height - rh)
+            val sub = Bitmap.createBitmap(region, rx, ry, rw, rh)
+
+            // Mẫu lớn thì tinh ở độ phân giải vừa phải để không quá nặng
+            var fs = 1
+            while (fs < bs &&
+                ((rw - sw) / fs + 1).toLong() * ((rh - sh) / fs + 1) * ((sw / fs) * (sh / fs)) > 40_000_000L
+            ) fs++
+
+            val f = search(gray(sub, fs), gray(st, fs))
+            if (st !== tpl) st.recycle()
+            if (f == null) continue
+            if (f.third > outScore) {
+                outScore = f.third
+                out = Hit(rx + f.first * fs + sw / 2, ry + f.second * fs + sh / 2, f.third, k)
+            }
+        }
+        return if (out != null && outScore >= threshold) out else null
     }
 }

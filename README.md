@@ -83,9 +83,10 @@ adb install -r apk/ScreenWatcher-debug.apk
      ```
    - Bấm **Thử luật** để kiểm tra khớp hay không (chưa chạy macro), rồi **Lưu**.
 3. Ở màn hình chính bật **Bật theo dõi**. Dừng bằng công tắc hoặc nút "Dừng hẳn" ở thông báo.
+4. **Nút nổi** (hiện sau khi cấp quyền chụp màn hình, tắt/bật bằng công tắc "Hiện nút nổi"): kéo để di chuyển, chạm để mở bảng nhanh gồm công tắc **Theo dõi**, danh sách luật để bật/tắt từng luật, **+ Luật** (thêm luật mới), **Mở app**, **Ẩn nút**. Nút xanh = đang theo dõi, xám = đang tắt. Nút tự ẩn khi bạn đang khoanh vùng/ảnh mẫu.
 
 ## Lưu ý
 - Android 14+ hỏi lại quyền chụp màn hình mỗi lần khởi động dịch vụ.
 - Một số app (ngân hàng, DRM...) chặn chụp màn hình hoặc chặn dịch vụ trợ năng; app đó sẽ hiện màn hình đen / không chạm được.
-- Template matching so khớp theo đúng tỉ lệ pixel: chọn ảnh mẫu trên chính thiết bị này, nên chọn hình có nhiều chi tiết, không quá nhỏ, và thu hẹp vùng quét để nhanh hơn.
+- Template matching tự thử nhiều tỉ lệ (0.4x–2.5x) nên ảnh trong vùng quét to/nhỏ hơn ảnh mẫu vẫn nhận được (log sẽ ghi tỉ lệ tìm thấy). Nên chọn hình có nhiều chi tiết, không quá nhỏ, và thu hẹp vùng quét để nhanh hơn. Nếu ảnh bị co giãn nhiều, có thể cần hạ ngưỡng khớp xuống ~0.7–0.8.
 - Chỉ dùng cho mục đích hợp lệ và tuân thủ điều khoản của ứng dụng/trò chơi bạn tự động hoá.

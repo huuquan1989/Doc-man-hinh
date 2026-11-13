@@ -93,6 +93,11 @@ object RuleStore {
 
     fun templateFile(c: Context, id: String) = File(c.filesDir, "tpl_$id.png")
 
+    fun bubbleOn(c: Context): Boolean = prefs(c).getBoolean("bubble", true)
+    fun setBubbleOn(c: Context, on: Boolean) = prefs(c).edit().putBoolean("bubble", on).apply()
+    fun bubblePos(c: Context): Pair<Int, Int> = prefs(c).getInt("bx", 0) to prefs(c).getInt("by", 300)
+    fun setBubblePos(c: Context, x: Int, y: Int) = prefs(c).edit().putInt("bx", x).putInt("by", y).apply()
+
     fun interval(c: Context): Long = prefs(c).getLong("interval", 700L)
     fun setInterval(c: Context, ms: Long) = prefs(c).edit().putLong("interval", ms.coerceIn(150L, 10_000L)).apply()
 }

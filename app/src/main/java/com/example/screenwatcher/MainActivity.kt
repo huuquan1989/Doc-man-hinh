@@ -30,6 +30,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var logView: TextView
     private lateinit var list: LinearLayout
     private lateinit var monitorSwitch: Switch
+    private lateinit var bubbleSwitch: Switch
     private lateinit var intervalEt: EditText
     private var updating = false
     private val h = Handler(Looper.getMainLooper())
@@ -103,6 +104,22 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(monitorSwitch)
 
+        bubbleSwitch = Switch(this).apply {
+            text = "Hiện nút nổi (bật/tắt luật, thêm luật nhanh)"; setPadding(0, dp(4), 0, dp(4))
+            isChecked = RuleStore.bubbleOn(this@MainActivity)
+            setOnCheckedChangeListener { _, on ->
+                if (updating) return@setOnCheckedChangeListener
+                RuleStore.setBubbleOn(this@MainActivity, on)
+                if (AppState.projectionReady) {
+                    startService(
+                        Intent(this@MainActivity, CaptureService::class.java)
+                            .setAction(CaptureService.A_BUBBLE).putExtra("on", on),
+                    )
+                }
+            }
+        }
+        root.addView(bubbleSwitch)
+
         val iv = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         iv.addView(TextView(this).apply { text = "Quét mỗi (ms): " })
         intervalEt = EditText(this).apply {
@@ -154,6 +171,7 @@ class MainActivity : ComponentActivity() {
             "Chụp màn hình: ${m(AppState.projectionReady)}"
         updating = true
         monitorSwitch.isChecked = AppState.monitoring
+        bubbleSwitch.isChecked = RuleStore.bubbleOn(this)
         updating = false
         logView.text = AppState.logText()
     }

@@ -47,6 +47,7 @@ class CaptureService : Service() {
         const val A_STOP = "sw.stop"
         const val A_PICK = "sw.pick"
         const val A_TEST = "sw.test"
+        const val A_BUBBLE = "sw.bubble"
         private const val CH = "sw_capture"
     }
 
@@ -59,6 +60,7 @@ class CaptureService : Service() {
     private var curH = 0
     @Volatile private var last: Bitmap? = null
     private var overlay: SelectorOverlay? = null
+    private var fab: FloatingButton? = null
     private var loop: Job? = null
     private val lastFire = HashMap<String, Long>()
 
@@ -67,16 +69,42 @@ class CaptureService : Service() {
     override fun onStartCommand(i: Intent?, flags: Int, startId: Int): Int {
         when (i?.action) {
             A_START -> start()
-            A_MONITOR -> {
-                AppState.monitoring = i.getBooleanExtra("on", false) && projection != null
-                getSystemService(NotificationManager::class.java).notify(1, notif())
-                AppState.log(if (AppState.monitoring) "▶ Bắt đầu theo dõi" else "⏸ Dừng theo dõi")
-            }
+            A_MONITOR -> setMonitoring(i.getBooleanExtra("on", false))
+            A_BUBBLE -> if (i.getBooleanExtra("on", true)) showBubble() else { fab?.hide() }
             A_STOP -> { stopAll(); return START_NOT_STICKY }
             A_PICK -> pick(i.getStringExtra("mode") ?: "REGIONS", i.getStringExtra("id") ?: "")
             A_TEST -> test(i.getStringExtra("id") ?: "")
         }
         return START_NOT_STICKY
+    }
+
+    private fun setMonitoring(on: Boolean) {
+        AppState.monitoring = on && projection != null
+        getSystemService(NotificationManager::class.java).notify(1, notif())
+        AppState.log(if (AppState.monitoring) "▶ Bắt đầu theo dõi" else "⏸ Dừng theo dõi")
+        fab?.refresh()
+    }
+
+    /* ---------------- nút nổi ---------------- */
+
+    private fun showBubble() {
+        if (projection == null || !RuleStore.bubbleOn(this) || !Settings.canDrawOverlays(this)) return
+        val f = fab ?: FloatingButton(
+            this,
+            onMonitor = { setMonitoring(it) },
+            onAddRule = {
+                startActivity(Intent(this, RuleEditActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            },
+            onOpenApp = {
+                startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            },
+            onHideButton = {
+                RuleStore.setBubbleOn(this, false)
+                fab?.hide()
+                Toast.makeText(this, "Đã ẩn nút nổi. Bật lại trong app ở mục \"Hiện nút nổi\".", Toast.LENGTH_LONG).show()
+            },
+        ).also { fab = it }
+        f.show()
     }
 
     /* ---------------- khởi động chụp màn hình ---------------- */
@@ -101,6 +129,7 @@ class CaptureService : Service() {
         AppState.projectionReady = true
         loop = scope.launch { runLoop() }
         AppState.log("✔ Đã cấp quyền chụp màn hình")
+        showBubble()
     }
 
     @Suppress("DEPRECATION")
@@ -173,7 +202,7 @@ class CaptureService : Service() {
             if (now - (lastFire[rule.id] ?: -1_000_000L) < rule.cooldownMs) continue
             val hit = safeEval(rule, frame) ?: continue
             lastFire[rule.id] = SystemClock.elapsedRealtime()
-            AppState.log("✔ '${rule.name}' khớp (${"%.2f".format(hit.score)}) tại ${hit.x},${hit.y}")
+            AppState.log("✔ '${rule.name}' khớp (${"%.2f".format(hit.score)}, tỉ lệ ${"%.2f".format(hit.scale)}x) tại ${hit.x},${hit.y}")
             Macro.run(rule.macro, hit.x, hit.y)
             lastFire[rule.id] = SystemClock.elapsedRealtime()
             break // chụp lại khung mới rồi mới xét tiếp
@@ -218,7 +247,7 @@ class CaptureService : Service() {
             val frame = grab()
             val msg = if (frame == null) "Chưa có khung hình" else {
                 val hit = safeEval(rule, frame)
-                if (hit != null) "KHỚP (${"%.2f".format(hit.score)}) tại ${hit.x},${hit.y}" else "không khớp"
+                if (hit != null) "KHỚP (${"%.2f".format(hit.score)}, tỉ lệ ${"%.2f".format(hit.scale)}x) tại ${hit.x},${hit.y}" else "không khớp"
             }
             AppState.log("Thử '${rule.name}': $msg")
             main.post { Toast.makeText(this@CaptureService, "Thử '${rule.name}': $msg", Toast.LENGTH_LONG).show() }
@@ -233,6 +262,7 @@ class CaptureService : Service() {
             return
         }
         overlay?.hide()
+        fab?.hide()
         AppState.picking = true
         overlay = SelectorOverlay(this, mode, onFinish = { rects, pt ->
             AppState.picking = false
@@ -255,13 +285,16 @@ class CaptureService : Service() {
                     }
                     "TEMPLATE" -> {
                         val rg = rects.lastOrNull()
-                        if (rg != null) main.postDelayed({ saveTemplate(rule, rg); reopenEditor(id) }, 450)
+                        if (rg != null) main.postDelayed({ saveTemplate(rule, rg); reopenEditor(id); showBubble() }, 450)
+                        else showBubble()
                     }
                 }
             }
+            if (rule == null || mode != "TEMPLATE") showBubble()
         }, onCancel = {
             AppState.picking = false
             overlay = null
+            showBubble()
             reopenEditor(id)
         }).also { it.show() }
     }
@@ -312,6 +345,7 @@ class CaptureService : Service() {
     private fun teardown() {
         loop?.cancel()
         overlay?.hide(); overlay = null
+        fab?.hide(); fab = null
         vd?.release(); vd = null
         reader?.close(); reader = null
         runCatching { projection?.stop() }
